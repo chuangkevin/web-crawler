@@ -1,0 +1,50 @@
+# Go build artifacts
+/bin/
+/build/
+/dist/
+/out/
+/*.exe
+/*.dll
+/*.so
+/*.dylib
+/*.test
+
+# Go mod cache
+/pkg/
+
+# Dependency directories (when vendoring)
+/vendor/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+
+# Logs and temp files
+*.log
+*.tmp
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# kubeconfig or other sensitive configs
+kubeconfig.yaml
+.kube/
+config.yaml
+secrets/
+certs/
+
+# Docker-related
+.env
+.docker/
+docker-compose.override.yml
+
+# ArgoCD generated stuff
+*.argocd-source.*
+
+# Binary output (custom)
+app-portal
+*.csv
