@@ -13,10 +13,10 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 import json
 
 # 設定常數
-NUM_BOARDS = 10
-ARTICLES_PER_BOARD = 15
-CONCURRENT_BOARDS = 3
-CONCURRENT_ARTICLES = 5
+NUM_BOARDS = 50
+ARTICLES_PER_BOARD = 100
+CONCURRENT_BOARDS = 5
+CONCURRENT_ARTICLES = 10
 PAGE_TIMEOUT = 30000
 REQUEST_DELAY = 1
 MAX_RETRIES = 2  # 最大重試次數
@@ -186,60 +186,135 @@ class PTTPlaywrightCrawler:
         return default_boards[:NUM_BOARDS]
 
     async def get_board_posts(self, board: Dict[str, str]) -> Tuple[Dict[str, str], List[Dict[str, str]]]:
-        """非同步獲取看板文章列表"""
+        """非同步獲取看板文章列表（支援多頁抓取）"""
         page = await self.context.new_page()
+        all_posts = []
         
         try:
-            url = board['url']
-            if not url.endswith('.html'):
-                url = url.rstrip('/') + '/index.html'
+            current_url = board['url']
+            if not current_url.endswith('.html'):
+                current_url = current_url.rstrip('/') + '/index.html'
             
-            await page.goto(url, wait_until='domcontentloaded', timeout=PAGE_TIMEOUT)
+            print(f"📄 {board['name']}: 開始多頁抓取，目標 {ARTICLES_PER_BOARD} 篇文章")
             
-            if not await self.handle_page_setup(page):
-                return board, []
+            page_num = 0
+            max_pages = 10  # 限制最大頁數避免無限循環
             
-            # 等待文章列表載入
-            await page.wait_for_selector('.r-ent', timeout=10000)
-            
-            # 獲取文章列表
-            article_elements = await page.locator('.r-ent').all()
-            
-            posts = []
-            for element in article_elements[:ARTICLES_PER_BOARD]:
+            while len(all_posts) < ARTICLES_PER_BOARD and page_num < max_pages:
+                page_num += 1
                 try:
-                    # 獲取標題連結
-                    title_link = element.locator('.title a')
-                    if await title_link.count() == 0:
-                        continue
+                    print(f"   🔄 正在抓取第 {page_num} 頁: {current_url}")
                     
-                    title = await title_link.text_content()
-                    href = await title_link.get_attribute('href')
+                    await page.goto(current_url, wait_until='domcontentloaded', timeout=PAGE_TIMEOUT)
                     
-                    if not title or not href:
-                        continue
+                    if not await self.handle_page_setup(page):
+                        print(f"   ❌ 第 {page_num} 頁設定失敗")
+                        break
                     
-                    # 獲取作者
-                    author_elem = element.locator('.author')
-                    author = await author_elem.text_content() if await author_elem.count() > 0 else ""
+                    # 等待文章列表載入
+                    await page.wait_for_selector('.r-ent', timeout=10000)
                     
-                    # 獲取日期
-                    date_elem = element.locator('.date')
-                    date = await date_elem.text_content() if await date_elem.count() > 0 else ""
+                    # 獲取文章列表
+                    article_elements = await page.locator('.r-ent').all()
+                    print(f"   📝 第 {page_num} 頁找到 {len(article_elements)} 個文章元素")
                     
-                    posts.append({
-                        'title': title.strip(),
-                        'link': 'https://www.ptt.cc' + href,
-                        'author': author.strip(),
-                        'date': date.strip(),
-                        'board': board['name']
-                    })
+                    page_posts = []
+                    for element in article_elements:
+                        try:
+                            # 如果已經達到目標數量就停止
+                            if len(all_posts) >= ARTICLES_PER_BOARD:
+                                break
+                                
+                            # 獲取標題連結
+                            title_link = element.locator('.title a')
+                            if await title_link.count() == 0:
+                                # 可能是被刪除的文章或公告
+                                continue
+                            
+                            title = await title_link.text_content()
+                            href = await title_link.get_attribute('href')
+                            
+                            if not title or not href:
+                                continue
+                            
+                            # 獲取作者
+                            author_elem = element.locator('.author')
+                            author = await author_elem.text_content() if await author_elem.count() > 0 else ""
+                            
+                            # 獲取日期
+                            date_elem = element.locator('.date')
+                            date = await date_elem.text_content() if await date_elem.count() > 0 else ""
+                            
+                            post = {
+                                'title': title.strip(),
+                                'link': 'https://www.ptt.cc' + href,
+                                'author': author.strip(),
+                                'date': date.strip(),
+                                'board': board['name']
+                            }
+                            
+                            page_posts.append(post)
+                            
+                        except Exception as e:
+                            print(f"⚠️ 解析文章錯誤: {e}")
+                            continue
+                    
+                    all_posts.extend(page_posts)
+                    print(f"   ✅ 第 {page_num} 頁獲取 {len(page_posts)} 篇有效文章，累計 {len(all_posts)} 篇")
+                    
+                    # 如果已經達到目標數量就停止
+                    if len(all_posts) >= ARTICLES_PER_BOARD:
+                        print(f"   🎯 已達到目標數量 {ARTICLES_PER_BOARD} 篇，停止抓取")
+                        break
+                    
+                    # 如果這頁沒有有效文章，可能已經到底了
+                    if len(page_posts) == 0:
+                        print(f"   ⚠️ 第 {page_num} 頁沒有有效文章，可能已到看板底部")
+                        break
+                    
+                    # 尋找上一頁連結來翻頁
+                    prev_page_link = None
+                    try:
+                        # PTT 的上一頁按鈕通常是 "‹ 上頁"
+                        prev_links = await page.locator('a:has-text("上頁")').all()
+                        if not prev_links:
+                            prev_links = await page.locator('a:has-text("‹")').all()
+                        if not prev_links:
+                            # 嘗試尋找包含 "上頁" 文字的鏈接
+                            prev_links = await page.locator('a').filter(has_text="上頁").all()
+                        
+                        if prev_links:
+                            href = await prev_links[0].get_attribute('href')
+                            if href and href != current_url:  # 確保不是同一頁
+                                prev_page_link = f"https://www.ptt.cc{href}"
+                                print(f"   🔗 找到上一頁連結: {href}")
+                        
+                    except Exception as e:
+                        print(f"   ⚠️ 尋找上一頁連結失敗: {e}")
+                    
+                    if not prev_page_link:
+                        print(f"   ⚠️ 沒有找到上一頁連結，停止翻頁")
+                        break
+                    
+                    # 檢查是否為重複URL（避免無限循環）
+                    if prev_page_link == current_url:
+                        print(f"   ⚠️ 上一頁連結與當前頁相同，停止翻頁")
+                        break
+                    
+                    current_url = prev_page_link
+                    
+                    # 添加翻頁延遲
+                    await asyncio.sleep(2)
                     
                 except Exception as e:
-                    print(f"⚠️ 解析文章錯誤: {e}")
-                    continue
+                    print(f"   ❌ 第 {page_num} 頁抓取失敗: {e}")
+                    break
             
-            return board, posts
+            # 限制到目標數量
+            final_posts = all_posts[:ARTICLES_PER_BOARD]
+            print(f"✅ {board['name']}: 完成抓取，總共獲取 {len(final_posts)} 篇文章 (共抓取 {page_num} 頁)")
+            
+            return board, final_posts
             
         except Exception as e:
             print(f"❌ 獲取 {board['name']} 文章失敗: {e}")
